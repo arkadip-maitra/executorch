@@ -415,6 +415,100 @@ class TestPreset(CMakeTestCase):
         self.create_workspace({"CMakeLists.txt": _cmake_lists_txt})
         self.run_cmake()
 
+    def test_check_required_options_any_on_if_on_off(self):
+        """Test that when IF_ON is OFF, REQUIRES_ANY checks are skipped."""
+
+        _cmake_lists_txt = """
+            cmake_minimum_required(VERSION 3.24)
+            project(test_preset)
+            include(${PROJECT_SOURCE_DIR}/preset.cmake)
+
+            set(FEATURE_FLAG OFF)
+            set(REQUIRED_OPTION1 OFF)
+            set(REQUIRED_OPTION2 OFF)
+
+            check_required_options_any_on(
+                IF_ON
+                    FEATURE_FLAG
+                REQUIRES_ANY
+                    REQUIRED_OPTION1
+                    REQUIRED_OPTION2
+            )
+        """
+        self.create_workspace({"CMakeLists.txt": _cmake_lists_txt})
+        self.run_cmake()
+
+    def test_check_required_options_any_on_one_enabled(self):
+        """Test that one enabled option satisfies REQUIRES_ANY."""
+
+        _cmake_lists_txt = """
+            cmake_minimum_required(VERSION 3.24)
+            project(test_preset)
+            include(${PROJECT_SOURCE_DIR}/preset.cmake)
+
+            set(FEATURE_FLAG ON)
+            set(REQUIRED_OPTION1 OFF)
+            set(REQUIRED_OPTION2 ON)
+
+            check_required_options_any_on(
+                IF_ON
+                    FEATURE_FLAG
+                REQUIRES_ANY
+                    REQUIRED_OPTION1
+                    REQUIRED_OPTION2
+            )
+        """
+        self.create_workspace({"CMakeLists.txt": _cmake_lists_txt})
+        self.run_cmake()
+
+    def test_check_required_options_any_on_cached_string_false_literal(self):
+        """Test that cached string OFF does not trigger REQUIRES_ANY checks."""
+
+        _cmake_lists_txt = """
+            cmake_minimum_required(VERSION 3.24)
+            project(test_preset)
+            include(${PROJECT_SOURCE_DIR}/preset.cmake)
+
+            set(FEATURE_FLAG OFF CACHE STRING "")
+            set(REQUIRED_OPTION1 OFF)
+            set(REQUIRED_OPTION2 OFF)
+
+            check_required_options_any_on(
+                IF_ON
+                    FEATURE_FLAG
+                REQUIRES_ANY
+                    REQUIRED_OPTION1
+                    REQUIRED_OPTION2
+            )
+        """
+        self.create_workspace({"CMakeLists.txt": _cmake_lists_txt})
+        self.run_cmake()
+
+    def test_check_required_options_any_on_all_disabled(self):
+        """Test that REQUIRES_ANY errors when all options are disabled."""
+
+        _cmake_lists_txt = """
+            cmake_minimum_required(VERSION 3.24)
+            project(test_preset)
+            include(${PROJECT_SOURCE_DIR}/preset.cmake)
+
+            set(FEATURE_FLAG ON)
+            set(REQUIRED_OPTION1 OFF)
+            set(REQUIRED_OPTION2 OFF)
+
+            check_required_options_any_on(
+                IF_ON
+                    FEATURE_FLAG
+                REQUIRES_ANY
+                    REQUIRED_OPTION1
+                    REQUIRED_OPTION2
+            )
+        """
+        self.create_workspace({"CMakeLists.txt": _cmake_lists_txt})
+        self.run_cmake(
+            error_contains="Use of 'FEATURE_FLAG' requires one of 'REQUIRED_OPTION1'"
+        )
+
     def test_check_required_options_on_one_required_off(self):
         """Test that when IF_ON is ON but one required option is OFF, a fatal error occurs."""
 

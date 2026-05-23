@@ -8,13 +8,22 @@ import json
 import os
 import tempfile
 import unittest
+from importlib import import_module
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, cast, Dict, List, TYPE_CHECKING
 from unittest.mock import NonCallableMock, patch
 
-import executorch.codegen.tools.gen_oplist as gen_oplist
 import yaml
-from executorch.codegen.tools.gen_oplist import ScalarType
+
+if TYPE_CHECKING:
+    import codegen.tools.gen_oplist as gen_oplist
+    from codegen.tools.gen_oplist import ScalarType
+else:
+    try:
+        gen_oplist = cast(Any, import_module("codegen.tools.gen_oplist"))
+    except ImportError:
+        gen_oplist = cast(Any, import_module("executorch.codegen.tools.gen_oplist"))
+    ScalarType = cast(Any, gen_oplist.ScalarType)
 
 
 class TestGenOpList(unittest.TestCase):
@@ -36,8 +45,8 @@ class TestGenOpList(unittest.TestCase):
             """
             )
 
-    @patch("executorch.codegen.tools.gen_oplist._get_operators")
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_wrong_path(
         self,
         mock_dump_yaml: NonCallableMock,
@@ -47,9 +56,9 @@ class TestGenOpList(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gen_oplist.main(args)
 
-    @patch("executorch.codegen.tools.gen_oplist._get_kernel_metadata_for_model")
-    @patch("executorch.codegen.tools.gen_oplist._get_operators")
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    @patch.object(gen_oplist, "_get_kernel_metadata_for_model")
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_valid_model_path(
         self,
         mock_get_kernel_metadata_for_model: NonCallableMock,
@@ -65,7 +74,7 @@ class TestGenOpList(unittest.TestCase):
         mock_get_operators.assert_called_once_with(temp_file.name)
         temp_file.close()
 
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_valid_root_ops(
         self,
         mock_dump_yaml: NonCallableMock,
@@ -84,7 +93,112 @@ class TestGenOpList(unittest.TestCase):
             False,
         )
 
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    def test_parse_select_spec_detects_all(self) -> None:
+        inputs = gen_oplist.parse_select_spec("all")
+        self.assertTrue(inputs.include_all_operators)
+        self.assertListEqual([], inputs.root_ops_values)
+        self.assertListEqual([], inputs.model_file_paths)
+
+    def test_parse_select_spec_detects_list_scalar(self) -> None:
+        inputs = gen_oplist.parse_select_spec("aten::add.out,aten::mul.out")
+        self.assertListEqual(["aten::add.out,aten::mul.out"], inputs.root_ops_values)
+        self.assertFalse(inputs.include_all_operators)
+
+    def test_parse_select_spec_detects_model_scalar(self) -> None:
+        model_path = os.path.join(self.temp_dir.name, "model.pte")
+        Path(model_path).touch()
+        inputs = gen_oplist.parse_select_spec(model_path)
+        self.assertListEqual([model_path], inputs.model_file_paths)
+        self.assertEqual(model_path, inputs.source_name)
+
+    def test_parse_select_spec_detects_ops_yaml_path(self) -> None:
+        inputs = gen_oplist.parse_select_spec(self.ops_schema_yaml)
+        self.assertListEqual([self.ops_schema_yaml], inputs.ops_schema_yaml_paths)
+        self.assertEqual(self.ops_schema_yaml, inputs.source_name)
+
+    def test_parse_select_spec_detects_structured_spec_file(self) -> None:
+        spec_path = os.path.join(self.temp_dir.name, "select_spec.yaml")
+        model_path = os.path.join(self.temp_dir.name, "model.pte")
+        Path(model_path).touch()
+        with open(spec_path, "w") as f:
+            f.write(
+                """
+include_all_operators: false
+selectors:
+  - type: model
+    value: model.pte
+  - type: list
+    value:
+      - aten::relu.out
+      - aten::sigmoid.out
+  - type: yaml
+    value: test.yaml
+ops_dict:
+  aten::add.out:
+    - Float
+"""
+            )
+        inputs = gen_oplist.parse_select_spec(spec_path)
+        self.assertListEqual([model_path], inputs.model_file_paths)
+        self.assertListEqual(
+            ["aten::relu.out,aten::sigmoid.out"], inputs.root_ops_values
+        )
+        self.assertListEqual([self.ops_schema_yaml], inputs.ops_schema_yaml_paths)
+        self.assertListEqual(
+            [{"aten::add.out": ["Float"]}],
+            inputs.ops_dict_payloads,
+        )
+        self.assertEqual(spec_path, inputs.source_name)
+
+    def test_parse_select_spec_detects_ops_dict_json_file(self) -> None:
+        ops_dict_path = os.path.join(self.temp_dir.name, "ops_dict.json")
+        with open(ops_dict_path, "w") as f:
+            json.dump({"aten::add.out": ["Float"], "aten::mm.out": []}, f)
+
+        inputs = gen_oplist.parse_select_spec(ops_dict_path)
+        self.assertListEqual(
+            [{"aten::add.out": ["Float"], "aten::mm.out": []}],
+            inputs.ops_dict_payloads,
+        )
+        self.assertEqual(ops_dict_path, inputs.source_name)
+
+    def test_parse_select_spec_rejects_empty_inline_ops_dict(self) -> None:
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec("{}")
+
+    def test_parse_select_spec_rejects_missing_model_path(self) -> None:
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec(
+                os.path.join(self.temp_dir.name, "missing_model.pte")
+            )
+
+    def test_parse_select_spec_rejects_missing_yaml_path(self) -> None:
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec(
+                os.path.join(self.temp_dir.name, "missing_select_spec.yaml")
+            )
+
+    def test_parse_select_spec_rejects_yaml_mapping_without_selectors(self) -> None:
+        yaml_path = os.path.join(self.temp_dir.name, "invalid_select_spec.yaml")
+        with open(yaml_path, "w") as f:
+            f.write("{}\n")
+
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec(yaml_path)
+
+    def test_select_spec_supports_dtype_selective_build_for_model(self) -> None:
+        model_path = os.path.join(self.temp_dir.name, "model.pte")
+        Path(model_path).touch()
+        self.assertTrue(
+            gen_oplist.select_spec_supports_dtype_selective_build(model_path)
+        )
+
+    def test_select_spec_supports_dtype_selective_build_for_yaml_is_false(self) -> None:
+        self.assertFalse(
+            gen_oplist.select_spec_supports_dtype_selective_build(self.ops_schema_yaml)
+        )
+
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_root_ops_and_dtypes(
         self,
         mock_dump_yaml: NonCallableMock,
@@ -113,8 +227,28 @@ class TestGenOpList(unittest.TestCase):
             False,
         )
 
-    @patch("executorch.codegen.tools.gen_oplist._get_operators")
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    @patch.object(gen_oplist, "_dump_yaml")
+    def test_gen_op_list_with_select_spec_all_scalar(
+        self,
+        mock_dump_yaml: NonCallableMock,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        gen_oplist.main(
+            [
+                f"--output_path={output_path}",
+                "--select_spec=all",
+            ]
+        )
+        mock_dump_yaml.assert_called_once_with(
+            [],
+            Path(output_path),
+            None,
+            {},
+            True,
+        )
+
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_both_op_list_and_ops_schema_yaml_merges(
         self,
         mock_dump_yaml: NonCallableMock,
@@ -140,7 +274,214 @@ class TestGenOpList(unittest.TestCase):
             False,
         )
 
-    @patch("executorch.codegen.tools.gen_oplist._dump_yaml")
+    @patch.object(gen_oplist, "_get_kernel_metadata_for_model")
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
+    def test_gen_op_list_with_select_spec_structured_spec_merges_sources(
+        self,
+        mock_dump_yaml: NonCallableMock,
+        mock_get_operators: NonCallableMock,
+        mock_get_kernel_metadata_for_model: NonCallableMock,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        spec_path = os.path.join(self.temp_dir.name, "select_spec.yaml")
+        model_path = os.path.join(self.temp_dir.name, "model.pte")
+        Path(model_path).touch()
+        model_kernel_key = "v1/6;0,1|6;0,1|6;0,1|6;0,1"
+        mock_get_operators.return_value = ["aten::mm.out", "aten::add.out"]
+        mock_get_kernel_metadata_for_model.return_value = {
+            "aten::add.out": [model_kernel_key],
+            "aten::mm.out": [model_kernel_key],
+        }
+        with open(spec_path, "w") as f:
+            f.write(
+                """
+include_all_operators: false
+selectors:
+  - type: model
+    value: model.pte
+  - type: list
+    value: aten::relu.out
+  - type: yaml
+    value: test.yaml
+ops_dict:
+  aten::sigmoid.out:
+    - Float
+"""
+            )
+
+        gen_oplist.main(
+            [
+                f"--output_path={output_path}",
+                f"--select_spec={spec_path}",
+            ]
+        )
+        mock_dump_yaml.assert_called_once_with(
+            [
+                "aten::add.out",
+                "aten::mm.out",
+                "aten::mul.out",
+                "aten::relu.out",
+                "aten::sigmoid.out",
+            ],
+            Path(output_path),
+            spec_path,
+            {
+                "aten::relu.out": ["default"],
+                "aten::add.out": ["default", model_kernel_key],
+                "aten::mul.out": ["default"],
+                "aten::sigmoid.out": ["v1/6;"],
+                "aten::mm.out": [model_kernel_key],
+            },
+            False,
+        )
+
+    @patch.object(gen_oplist, "_dump_yaml")
+    def test_gen_op_list_with_ops_dict_path(
+        self,
+        mock_dump_yaml: NonCallableMock,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        ops_dict_path = os.path.join(self.temp_dir.name, "ops_dict.yaml")
+        with open(ops_dict_path, "w") as f:
+            f.write(
+                """
+aten::add.out:
+  - Float
+aten::mm.out: []
+"""
+            )
+
+        gen_oplist.main(
+            [
+                f"--output_path={output_path}",
+                f"--ops_dict_path={ops_dict_path}",
+            ]
+        )
+        mock_dump_yaml.assert_called_once_with(
+            ["aten::add.out", "aten::mm.out"],
+            Path(output_path),
+            None,
+            {
+                "aten::add.out": ["v1/6;"],
+                "aten::mm.out": ["default"],
+            },
+            False,
+        )
+
+    def test_gen_op_list_with_select_spec_requires_dtype_metadata_fails_for_list(
+        self,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        with self.assertRaises(RuntimeError):
+            gen_oplist.main(
+                [
+                    f"--output_path={output_path}",
+                    "--select_spec=aten::add.out,aten::mul.out",
+                    "--require_dtype_selective_metadata",
+                ]
+            )
+
+    def test_parse_select_spec_rejects_unknown_selector_type(self) -> None:
+        spec_path = os.path.join(self.temp_dir.name, "bad_select_spec.yaml")
+        with open(spec_path, "w") as f:
+            f.write(
+                """
+selectors:
+  - type: dict
+    value: {}
+"""
+            )
+
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec(spec_path)
+
+    def test_parse_select_spec_rejects_missing_model_in_structured_spec(self) -> None:
+        spec_path = os.path.join(self.temp_dir.name, "missing_model_spec.yaml")
+        with open(spec_path, "w") as f:
+            f.write(
+                """
+selectors:
+  - type: model
+    value: missing_model.pte
+"""
+            )
+
+        with self.assertRaises(ValueError):
+            gen_oplist.parse_select_spec(spec_path)
+
+    @patch.object(gen_oplist, "_get_kernel_metadata_for_model")
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
+    def test_gen_op_list_with_model_and_op_list_merges(
+        self,
+        mock_dump_yaml: NonCallableMock,
+        mock_get_operators: NonCallableMock,
+        mock_get_kernel_metadata_for_model: NonCallableMock,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        temp_file = tempfile.NamedTemporaryFile()
+        model_kernel_key = "v1/6;0,1|6;0,1|6;0,1|6;0,1"
+        mock_get_operators.return_value = ["aten::mm.out", "aten::add.out"]
+        mock_get_kernel_metadata_for_model.return_value = {
+            "aten::add.out": [model_kernel_key],
+            "aten::mm.out": [model_kernel_key],
+        }
+        args = [
+            f"--output_path={output_path}",
+            "--root_ops=aten::relu.out",
+            f"--model_file_path={temp_file.name}",
+        ]
+        gen_oplist.main(args)
+        mock_dump_yaml.assert_called_once_with(
+            ["aten::add.out", "aten::mm.out", "aten::relu.out"],
+            Path(output_path),
+            temp_file.name,
+            {
+                "aten::relu.out": ["default"],
+                "aten::add.out": [model_kernel_key],
+                "aten::mm.out": [model_kernel_key],
+            },
+            False,
+        )
+        temp_file.close()
+
+    @patch.object(gen_oplist, "_get_kernel_metadata_for_model")
+    @patch.object(gen_oplist, "_get_operators")
+    @patch.object(gen_oplist, "_dump_yaml")
+    def test_gen_op_list_with_model_and_overlapping_op_list_widens_metadata(
+        self,
+        mock_dump_yaml: NonCallableMock,
+        mock_get_operators: NonCallableMock,
+        mock_get_kernel_metadata_for_model: NonCallableMock,
+    ) -> None:
+        output_path = os.path.join(self.temp_dir.name, "output.yaml")
+        temp_file = tempfile.NamedTemporaryFile()
+        model_kernel_key = "v1/6;0,1|6;0,1|6;0,1|6;0,1"
+        mock_get_operators.return_value = ["aten::mm.out", "aten::add.out"]
+        mock_get_kernel_metadata_for_model.return_value = {
+            "aten::add.out": [model_kernel_key],
+            "aten::mm.out": [model_kernel_key],
+        }
+        args = [
+            f"--output_path={output_path}",
+            "--root_ops=aten::add.out",
+            f"--model_file_path={temp_file.name}",
+        ]
+        gen_oplist.main(args)
+        mock_dump_yaml.assert_called_once_with(
+            ["aten::add.out", "aten::mm.out"],
+            Path(output_path),
+            temp_file.name,
+            {
+                "aten::add.out": ["default", model_kernel_key],
+                "aten::mm.out": [model_kernel_key],
+            },
+            False,
+        )
+        temp_file.close()
+
+    @patch.object(gen_oplist, "_dump_yaml")
     def test_gen_op_list_with_include_all_operators(
         self,
         mock_dump_yaml: NonCallableMock,

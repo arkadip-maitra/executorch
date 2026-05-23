@@ -11,9 +11,152 @@
 # arguments.
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
 
+function(executorch_resolve_file_selector INPUT OUTPUT_VAR)
+  if(NOT INPUT)
+    set(${OUTPUT_VAR}
+        ""
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  if(IS_ABSOLUTE "${INPUT}")
+    set(${OUTPUT_VAR}
+        "${INPUT}"
+        PARENT_SCOPE
+    )
+  else()
+    get_filename_component(
+      _resolved "${INPUT}" ABSOLUTE BASE_DIR "${EXECUTORCH_ROOT}"
+    )
+    set(${OUTPUT_VAR}
+        "${_resolved}"
+        PARENT_SCOPE
+    )
+  endif()
+endfunction()
+
+function(executorch_resolve_select_spec INPUT OUTPUT_VAR OUTPUT_IS_FILE_VAR)
+  if(NOT INPUT)
+    set(${OUTPUT_VAR}
+        ""
+        PARENT_SCOPE
+    )
+    set(${OUTPUT_IS_FILE_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  string(TOLOWER "${INPUT}" _input_lower)
+  if(_input_lower STREQUAL "all"
+     OR "${INPUT}" MATCHES "^\\{"
+     OR NOT _input_lower MATCHES "\\.(pte|json|yaml|yml)$"
+  )
+    set(${OUTPUT_VAR}
+        "${INPUT}"
+        PARENT_SCOPE
+    )
+    set(${OUTPUT_IS_FILE_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  executorch_resolve_file_selector("${INPUT}" _resolved)
+  set(${OUTPUT_VAR}
+      "${_resolved}"
+      PARENT_SCOPE
+  )
+  set(${OUTPUT_IS_FILE_VAR}
+      TRUE
+      PARENT_SCOPE
+  )
+endfunction()
+
+function(executorch_select_spec_supports_dtype_selective_build INPUT OUT_VAR)
+  if(NOT INPUT)
+    set(${OUT_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  executorch_resolve_select_spec("${INPUT}" _resolved_select_spec _spec_is_file)
+  string(TOLOWER "${INPUT}" _input_lower)
+
+  if(_input_lower STREQUAL "all")
+    set(${OUT_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  if(_input_lower MATCHES "\\.pte$")
+    set(${OUT_VAR}
+        TRUE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  if(NOT _spec_is_file AND NOT "${INPUT}" MATCHES "^\\{")
+    set(${OUT_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+    return()
+  endif()
+
+  if(NOT PYTHON_EXECUTABLE)
+    resolve_python_executable()
+  endif()
+
+  execute_process(
+    COMMAND
+      "${PYTHON_EXECUTABLE}" -m codegen.tools.gen_oplist
+      --select_spec=${_resolved_select_spec}
+      --check_select_spec_supports_dtype_selective_build
+    WORKING_DIRECTORY ${EXECUTORCH_ROOT}
+    RESULT_VARIABLE _result
+    OUTPUT_VARIABLE _output
+    ERROR_VARIABLE _error
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(NOT _result EQUAL 0)
+    message(
+      FATAL_ERROR
+        "Failed to validate EXECUTORCH_SELECT_OPS for dtype selective build: ${_error}${_output}"
+    )
+  endif()
+
+  if("${_output}" STREQUAL "TRUE")
+    set(${OUT_VAR}
+        TRUE
+        PARENT_SCOPE
+    )
+  else()
+    set(${OUT_VAR}
+        FALSE
+        PARENT_SCOPE
+    )
+  endif()
+endfunction()
+
 function(gen_selected_ops)
-  set(arg_names LIB_NAME OPS_SCHEMA_YAML ROOT_OPS INCLUDE_ALL_OPS
-                OPS_FROM_MODEL DTYPE_SELECTIVE_BUILD
+  set(arg_names
+      LIB_NAME
+      OPS_SCHEMA_YAML
+      ROOT_OPS
+      INCLUDE_ALL_OPS
+      OPS_FROM_MODEL
+      OPS_DICT_PATH
+      SELECT_SPEC
+      DTYPE_SELECTIVE_BUILD
   )
   cmake_parse_arguments(GEN "" "" "${arg_names}" ${ARGN})
 
@@ -23,16 +166,48 @@ function(gen_selected_ops)
   message(STATUS "  ROOT_OPS: ${GEN_ROOT_OPS}")
   message(STATUS "  INCLUDE_ALL_OPS: ${GEN_INCLUDE_ALL_OPS}")
   message(STATUS "  OPS_FROM_MODEL: ${GEN_OPS_FROM_MODEL}")
+  message(STATUS "  OPS_DICT_PATH: ${GEN_OPS_DICT_PATH}")
+  message(STATUS "  SELECT_SPEC: ${GEN_SELECT_SPEC}")
   message(STATUS "  DTYPE_SELECTIVE_BUILD: ${GEN_DTYPE_SELECTIVE_BUILD}")
 
   set(_out_dir ${CMAKE_CURRENT_BINARY_DIR}/${GEN_LIB_NAME})
+  executorch_resolve_file_selector(
+    "${GEN_OPS_SCHEMA_YAML}" _resolved_ops_schema_yaml
+  )
+  executorch_resolve_file_selector(
+    "${GEN_OPS_FROM_MODEL}" _resolved_ops_from_model
+  )
+  executorch_resolve_file_selector(
+    "${GEN_OPS_DICT_PATH}" _resolved_ops_dict_path
+  )
+  executorch_resolve_select_spec(
+    "${GEN_SELECT_SPEC}" _resolved_select_spec _select_spec_is_file
+  )
 
   if(GEN_DTYPE_SELECTIVE_BUILD)
-    if(NOT GEN_OPS_FROM_MODEL)
+    if(NOT _resolved_ops_from_model
+       AND NOT _resolved_ops_dict_path
+       AND NOT _resolved_select_spec
+    )
       message(
         FATAL_ERROR
-          "  DTYPE_SELECTIVE_BUILD is only support with model API, please pass in a model"
+          "  DTYPE_SELECTIVE_BUILD requires a model, ops dict path, or consolidated select spec"
       )
+    endif()
+    if(_resolved_select_spec
+       AND NOT _resolved_ops_from_model
+       AND NOT _resolved_ops_dict_path
+    )
+      executorch_select_spec_supports_dtype_selective_build(
+        "${_resolved_select_spec}" _supports_dtype_selective_build
+      )
+      if(NOT _supports_dtype_selective_build)
+        message(
+          FATAL_ERROR
+            "  DTYPE_SELECTIVE_BUILD requires model- or ops_dict-derived metadata. "
+            "EXECUTORCH_SELECT_OPS='${GEN_SELECT_SPEC}' resolves to list/yaml/all-only metadata."
+        )
+      endif()
     endif()
   endif()
 
@@ -41,14 +216,27 @@ function(gen_selected_ops)
   file(MAKE_DIRECTORY ${_out_dir})
 
   file(GLOB_RECURSE _codegen_tools_srcs "${EXECUTORCH_ROOT}/codegen/tools/*.py")
+  set(_gen_oplist_deps ${_codegen_tools_srcs})
+  if(_resolved_ops_schema_yaml)
+    list(APPEND _gen_oplist_deps ${_resolved_ops_schema_yaml})
+  endif()
+  if(_resolved_ops_from_model)
+    list(APPEND _gen_oplist_deps ${_resolved_ops_from_model})
+  endif()
+  if(_resolved_ops_dict_path)
+    list(APPEND _gen_oplist_deps ${_resolved_ops_dict_path})
+  endif()
+  if(_select_spec_is_file)
+    list(APPEND _gen_oplist_deps ${_resolved_select_spec})
+  endif()
 
   set(_gen_oplist_command "${PYTHON_EXECUTABLE}" -m codegen.tools.gen_oplist
                           --output_path=${_oplist_yaml}
   )
 
-  if(GEN_OPS_SCHEMA_YAML)
+  if(_resolved_ops_schema_yaml)
     list(APPEND _gen_oplist_command
-         --ops_schema_yaml_path="${GEN_OPS_SCHEMA_YAML}"
+         --ops_schema_yaml_path="${_resolved_ops_schema_yaml}"
     )
   endif()
   if(GEN_ROOT_OPS)
@@ -57,8 +245,21 @@ function(gen_selected_ops)
   if(GEN_INCLUDE_ALL_OPS)
     list(APPEND _gen_oplist_command --include_all_operators)
   endif()
-  if(GEN_OPS_FROM_MODEL)
-    list(APPEND _gen_oplist_command --model_file_path="${GEN_OPS_FROM_MODEL}")
+  if(_resolved_ops_from_model)
+    list(APPEND _gen_oplist_command
+         --model_file_path="${_resolved_ops_from_model}"
+    )
+  endif()
+  if(_resolved_ops_dict_path)
+    list(APPEND _gen_oplist_command
+         --ops_dict_path="${_resolved_ops_dict_path}"
+    )
+  endif()
+  if(_resolved_select_spec)
+    list(APPEND _gen_oplist_command --select_spec="${_resolved_select_spec}")
+  endif()
+  if(GEN_DTYPE_SELECTIVE_BUILD)
+    list(APPEND _gen_oplist_command --require_dtype_selective_metadata)
   endif()
 
   message("Command - ${_gen_oplist_command}")
@@ -66,7 +267,7 @@ function(gen_selected_ops)
     COMMENT "Generating selected_operators.yaml for ${GEN_LIB_NAME}"
     OUTPUT ${_oplist_yaml}
     COMMAND ${_gen_oplist_command}
-    DEPENDS ${GEN_OPS_SCHEMA_YAML} ${_codegen_tools_srcs}
+    DEPENDS ${_gen_oplist_deps}
     WORKING_DIRECTORY ${EXECUTORCH_ROOT}
   )
 
@@ -74,14 +275,14 @@ function(gen_selected_ops)
     set(_opvariant_h ${_out_dir}/selected_op_variants.h)
     set(_gen_opvariant_command
         "${PYTHON_EXECUTABLE}" -m codegen.tools.gen_selected_op_variants
-        --yaml-file=${_oplist_yaml} --output-dir=${_out_dir}/
+        --yaml_file_path=${_oplist_yaml} --output_dir=${_out_dir}/
     )
     message("Command - ${_gen_opvariant_command}")
     add_custom_command(
       COMMENT "Generating ${_opvariant_h} for ${GEN_LIB_NAME}"
       OUTPUT ${_opvariant_h}
       COMMAND ${_gen_opvariant_command}
-      DEPENDS ${_oplist_yaml} ${GEN_OPS_SCHEMA_YAML} ${_codegen_tools_srcs}
+      DEPENDS ${_oplist_yaml} ${_gen_oplist_deps}
       WORKING_DIRECTORY ${EXECUTORCH_ROOT}
     )
   endif()
@@ -355,8 +556,6 @@ function(gen_operators_lib)
           selected_portable_kernels PRIVATE EXECUTORCH_SELECTIVE_BUILD_DTYPE=1
         )
 
-        # Export these helper targets too because executorch_selected_kernels
-        # publicly links selected_portable_kernels in the dtype-selective path.
         install(
           TARGETS selected_kernels_util_all_deps selected_portable_kernels
           EXPORT ExecuTorchTargets
