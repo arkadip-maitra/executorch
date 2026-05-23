@@ -304,6 +304,12 @@ define_overridable_option(
 
 # Selective build options. These affect the executorch_kernels target.
 define_overridable_option(
+  EXECUTORCH_SELECT_OPS
+  "Build the executorch_kernels target using a consolidated selector string or spec file."
+  STRING
+  ""
+)
+define_overridable_option(
   EXECUTORCH_SELECT_OPS_YAML
   "Build the executorch_kernels target with YAML selective build config."
   STRING ""
@@ -408,10 +414,26 @@ check_required_options_on(
   IF_ON EXECUTORCH_BUILD_TESTS REQUIRES EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR
 )
 
-check_required_options_on(
-  IF_ON EXECUTORCH_ENABLE_DTYPE_SELECTIVE_BUILD REQUIRES
-  EXECUTORCH_SELECT_OPS_MODEL
+check_required_options_any_on(
+  IF_ON EXECUTORCH_ENABLE_DTYPE_SELECTIVE_BUILD REQUIRES_ANY
+  EXECUTORCH_SELECT_OPS_MODEL EXECUTORCH_SELECT_OPS
 )
+if(EXECUTORCH_ENABLE_DTYPE_SELECTIVE_BUILD
+   AND NOT EXECUTORCH_SELECT_OPS STREQUAL ""
+   AND EXECUTORCH_SELECT_OPS_MODEL STREQUAL ""
+)
+  executorch_select_spec_supports_dtype_selective_build(
+    "${EXECUTORCH_SELECT_OPS}" _executorch_select_ops_supports_dtype
+  )
+  if(NOT _executorch_select_ops_supports_dtype)
+    message(
+      FATAL_ERROR
+        "Use of 'EXECUTORCH_ENABLE_DTYPE_SELECTIVE_BUILD' with "
+        "'EXECUTORCH_SELECT_OPS' requires model- or ops_dict-derived metadata. "
+        "List, operator-yaml, and include-all selectors are not sufficient."
+    )
+  endif()
+endif()
 
 check_required_options_on(
   IF_ON EXECUTORCH_BUILD_XNNPACK REQUIRES EXECUTORCH_BUILD_CPUINFO
@@ -421,6 +443,15 @@ check_required_options_on(
 check_conflicting_options_on(
   IF_ON EXECUTORCH_BUILD_ARM_BAREMETAL CONFLICTS_WITH
   EXECUTORCH_BUILD_PTHREADPOOL EXECUTORCH_BUILD_CPUINFO
+)
+
+# Legacy selective build selectors may be combined. gen_oplist.py merges
+# operator lists, schema YAMLs, and model-derived metadata into one
+# selected_operators.yaml file. EXECUTORCH_SELECT_OPS is the preferred new API
+# and should not be mixed with the legacy selector knobs.
+check_conflicting_options_on(
+  IF_ON EXECUTORCH_SELECT_OPS CONFLICTS_WITH EXECUTORCH_SELECT_OPS_YAML
+  EXECUTORCH_SELECT_OPS_LIST EXECUTORCH_SELECT_OPS_MODEL
 )
 
 check_required_options_on(

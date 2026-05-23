@@ -207,6 +207,28 @@ function(check_required_options_on)
   endif()
 endfunction()
 
+function(check_required_options_any_on)
+  cmake_parse_arguments(ARG "" "IF_ON" "REQUIRES_ANY" ${ARGN})
+
+  is_option_enabled(${ARG_IF_ON} _if_on)
+  if(_if_on)
+    set(_enabled_options "")
+    foreach(required ${ARG_REQUIRES_ANY})
+      is_option_enabled(${required} _required_on)
+      if(_required_on)
+        list(APPEND _enabled_options ${required})
+      endif()
+    endforeach()
+
+    if(NOT _enabled_options)
+      string(JOIN "', '" _required_list ${ARG_REQUIRES_ANY})
+      message(
+        FATAL_ERROR "Use of '${ARG_IF_ON}' requires one of '${_required_list}'"
+      )
+    endif()
+  endif()
+endfunction()
+
 # Check if flags conflict with each other.
 function(check_conflicting_options_on)
   cmake_parse_arguments(ARG "" "IF_ON" "CONFLICTS_WITH" ${ARGN})
